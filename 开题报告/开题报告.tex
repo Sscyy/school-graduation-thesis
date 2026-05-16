@@ -1,0 +1,312 @@
+% !Mode:: "TeX:UTF-8"
+%!TEX program = xelatex
+
+\documentclass{sufethesismas}
+\bibliographystyle{bib/gbt7714-numerical.bst}
+
+\usepackage{tikz}
+\usetikzlibrary{shapes.geometric, arrows.meta, positioning, fit, backgrounds}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{float}
+\usepackage{tabularx}
+\usepackage{array}
+
+\makeatletter
+\makeatother
+
+\begin{document}
+
+\frontmatter
+
+\begin{center}
+  {\heiti\zihao{-2} 基于SAM与Mamba的病理图像细胞核实例分割与分类研究}\\[1em]
+  {\songti\zihao{-3}
+    \begin{tabular}{ll}
+      学\quad 生：& 苏晨研 \\[0.8em]
+    \end{tabular}
+  }
+\end{center}
+
+\tableofcontents{}
+
+\clearpage
+\pagenumbering{arabic}
+\setcounter{page}{2}
+
+\mainmatter
+
+%% ============================================================
+\chapter{研究背景与意义}
+%% ============================================================
+
+\section{数字病理学的临床价值}
+
+癌症是全球范围内死亡率最高的疾病之一。在临床诊断中，病理切片分析是确诊癌症的"金标准"——医生通过对组织切片在显微镜下的观察，判断细胞的形态、分布和类型，从而做出诊断。随着数字扫描技术的发展，玻璃切片已经可以被数字化为高分辨率的全幻灯片图像（Whole Slide Image，WSI），分辨率往往高达数万$\times$数万像素。这使得计算机辅助的自动分析成为可能，也催生了数字病理学这一新兴领域。
+
+数字病理学的核心任务之一是对组织切片中的细胞核进行自动分析。细胞核的形态、大小、密度和类型分布，是判断肿瘤恶性程度、预测患者预后、指导治疗方案的重要依据。例如，肿瘤浸润淋巴细胞（Tumor Infiltrating Lymphocytes，TILs）的密度与癌症患者的生存率显著相关；核的异型性（大小不规则、染色质分布异常）是恶性肿瘤的典型特征之一。因此，精确的细胞核自动分析具有重要的临床应用价值。
+
+\section{细胞核分析的两个核心任务}
+
+细胞核的自动计算机分析主要包含两个子任务：
+
+\textbf{实例分割（Instance Segmentation）}：在图像中识别出每一个独立的细胞核，并给出其精确的像素级轮廓。这与语义分割不同——语义分割只区分"核"和"背景"两类，而实例分割需要区分每一个独立的核个体。在密集的病理图像中，相邻细胞核经常紧密粘连，使得实例分割极具挑战性。
+
+\textbf{核类型分类（Nuclear Type Classification）}：在完成实例分割的基础上，进一步判断每个核属于哪种细胞类型，例如肿瘤上皮细胞核、炎症细胞核、结缔组织细胞核、死亡细胞核等。不同类型细胞核的空间分布模式对于肿瘤微环境分析至关重要。
+
+\section{人工分析的局限性与自动化的必要性}
+
+目前，细胞核分析主要依赖病理科医生的人工判读。然而，一张典型的全幻灯片图像中包含数以万计的细胞核，人工逐一标注和分析不仅耗时耗力（标注一张WSI往往需要数小时），还存在显著的观察者间差异。研究表明，不同病理医生对同一切片的判读结果存在约15\%\textasciitilde{}30\%的不一致率。因此，开发精确、高效的自动化细胞核分析算法，对于推动数字病理学的临床落地具有重要意义。
+
+
+%% ============================================================
+\chapter{研究现状}
+%% ============================================================
+
+\section{经典方法：基于能量函数的分水岭算法}
+
+在深度学习兴起之前，细胞核实例分割主要依赖传统图像处理方法。分水岭算法（Watershed）是最常用的一类方法，通过构造图像的能量景观，将相邻核之间的凹陷区域识别为分界线，从而分离粘连的核实例。然而，这类方法严重依赖手工设计的特征和人工调节的阈值参数，在核形态多样、染色不均匀的真实病理图像上泛化能力有限，且对粘连核的分离效果不稳定。
+
+\section{深度学习方法的兴起}
+
+\subsection{基于轮廓预测的方法}
+
+深度学习方法的早期代表是基于双分支结构的方法。DCAN（2016）提出同时预测核区域和核轮廓的双分支网络，通过从核区域掩码中减去轮廓掩码来分离实例。CIA-Net（2019）在此基础上引入轮廓感知信息聚合模块，进一步提升了轮廓预测精度。这类方法的思路清晰，但轮廓预测在粘连严重的区域往往不准确，且对轮廓宽度的设定敏感。
+
+\subsection{HoverNet：基于距离图的里程碑方法}
+
+HoverNet~\cite{Graham2019}是细胞核实例分割领域最具影响力的方法之一，至今仍是该领域的标准基线。其核心创新是引入"水平-垂直距离图"（Horizontal and Vertical Maps，HoVer Maps）机制：网络预测每个核像素到其所在核质心的水平距离和垂直距离，利用距离图在粘连核边界处的梯度突变来分离相邻核实例。
+
+HoverNet采用预激活ResNet50（Preact-ResNet50）作为特征提取器，设计了三个并行的解码器分支：核像素分支（NP Branch）输出二值分割掩码，HoVer分支输出距离图，核类型分支（NC Branch）输出每个核像素的类型概率。三分支联合训练，共享底层特征。
+
+HoverNet在CoNSeP、PanNuke、MoNuSAC等多个数据集上取得了当时最优的性能，并提供了开源代码和预训练权重，极大地推动了该领域的研究进展。然而，HoverNet的特征提取器是在ImageNet（自然图像）上预训练的ResNet50，与病理图像的视觉域存在较大差异；同时，其基于patch的处理方式导致patch边界处的核实例容易出现分割误差。
+
+\subsection{基于Transformer的方法}
+
+Transformer在自然语言处理领域的成功很快被迁移到计算机视觉任务。TransNuSeg~\cite{He2023}是首个将纯Transformer框架（Swin Transformer）应用于细胞核分割的工作，提出了三解码器结构（分别处理核实例、普通边缘和粘连边缘），并引入注意力共享机制减少参数量，以及自蒸馏损失提升多分支一致性，在MoNuSeg数据集上相比CA$^{2.5}$-Net提升了2\textasciitilde{}3\%的Dice分数。CellViT~\cite{Horst2023}则利用SAM（Segment Anything Model）预训练的ViT encoder初始化分割网络，在PanNuke数据集上取得了mPQ=0.50的成绩。
+
+Transformer方法的优势在于能够通过自注意力机制捕获全局上下文信息，相比CNN具有更强的长程依赖建模能力。然而，标准Transformer的计算复杂度与序列长度的平方成正比，对于高分辨率病理图像的处理仍面临计算效率挑战；此外，基于patch的处理方式依然没有得到根本解决。
+
+\subsection{基于SAM的适配方法}
+
+2023年，Meta发布的Segment Anything Model（SAM）~\cite{Kirillov2023}在通用图像分割领域引发了广泛关注。SAM基于超过10亿个分割掩码训练，具备强大的零样本泛化能力。多项研究探索了SAM在细胞核分割中的应用。
+
+UN-SAM~\cite{Chen2024}提出了无需手动提示的SAM框架，设计了多尺度自提示生成模块（SPGen）自动产生分割提示，以及域自适应调优编码器（DT-Encoder）提升跨域泛化能力，在多个数据集上的零样本泛化性能显著优于其他医学SAM方法。NuSegDG~\cite{Lou2024}将SAM与异质空间适配器（HS-Adapter）和高斯核提示编码器（GKP-Encoder）结合，实现了域泛化的细胞核实例分割，但未涉及核类型分类任务。
+
+这些工作证明了SAM强大的特征提取能力在细胞核分割中的价值，但现有方法大多专注于提示机制的设计，尚未充分探索SAM encoder与其他序列建模技术的结合。
+
+\subsection{基于Mamba的方法}
+
+Mamba~\cite{Gu2023}是一种基于状态空间模型（State Space Model，SSM）的序列建模架构，具有线性时间复杂度，能够在保持全局感受野的同时高效处理长序列。与Transformer的二次复杂度相比，Mamba在处理长序列时具有显著的计算优势。
+
+PanopMamba~\cite{PanopMamba2026}是首个将Mamba应用于细胞核分割的工作，提出了多尺度Mamba主干与SSM融合网络的结合，在MoNuSAC2020和NuInsSeg数据集上取得了优于现有方法的全景分割性能。Category Prompt Mamba（CPMamba）~\cite{CPMamba2025}则利用Mamba的线性复杂度实现了对完整病理图像（而非patch）的处理，从根本上解决了patch边界对齐问题，在核分割与分类任务上取得了良好效果。
+
+然而，现有Mamba方法均未与SAM encoder结合，也未在HoverNet的成熟三分支解码框架下验证Mamba的有效性。
+
+\section{现有方法的共同局限}
+
+综合以上分析，现有方法存在以下几个共同局限：
+
+\textbf{局限一：特征提取器与病理图像的域偏移问题。}大多数方法（包括HoverNet）使用ImageNet预训练的encoder，而ImageNet是自然图像数据集，与H\&E染色病理图像的视觉特征存在本质差异（色彩分布、纹理模式、目标尺度均不同）。这导致特征提取器对病理图像的适配性不足，限制了分割精度。
+
+\textbf{局限二：patch边界处的实例分割误差。}由于病理图像分辨率极高，现有方法普遍采用patch级处理策略，即将大图切成小块分别处理后再拼接。位于patch边界处的细胞核往往被截断，导致这部分核的分割结果出现明显误差，影响整体性能。
+
+\textbf{局限三：SAM与序列建模技术的结合尚未探索。}SAM的强边界感知能力和Mamba的高效长程依赖建模各有优势，二者在细胞核实例分割与分类任务中的结合目前尚无相关工作。
+
+
+%% ============================================================
+\chapter{研究问题}
+%% ============================================================
+
+基于上述现状分析，本研究聚焦于以下核心问题：
+
+\textbf{如何设计一个细胞核实例分割与分类框架，使其同时具备：（1）与病理图像域高度匹配的特征提取能力；（2）有效建模跨patch长程上下文的能力；（3）在多种组织类型和染色条件下的泛化能力？}
+
+具体而言，本研究需要回答以下三个子问题：
+
+\begin{enumerate}
+  \item SAM的强边界感知特征是否能够显著提升细胞核实例分割的精度，相比ImageNet预训练encoder有多大提升？
+  \item Mamba的长程序列建模能否有效缓解patch边界处的分割误差，相比无Mamba的基线有多大改进？
+  \item SAM encoder与Mamba融合模块的结合，是否能在保留HoverNet成熟解码器框架的前提下，在多个标准数据集上取得优于现有SOTA方法的综合性能？
+\end{enumerate}
+
+
+%% ============================================================
+\chapter{研究方案}
+%% ============================================================
+
+\section{总体框架}
+
+本研究提出\textbf{SAM-Mamba-HoverNet}，一个融合SAM强边界特征、Mamba长程建模与HoverNet成熟解码器的细胞核实例分割与分类框架。整体架构如图~\ref{fig:arch}所示。
+
+\begin{figure}[H]
+  \centering
+  \begin{tikzpicture}[
+    block/.style={
+      rectangle, rounded corners=4pt,
+      draw=black!70, fill=blue!8,
+      text width=9cm, minimum height=1.4cm,
+      align=center, font=\songti\zihao{5}
+    },
+    arrow/.style={-Stealth, thick},
+    label/.style={font=\songti\zihao{5}, text=gray!80},
+    io/.style={
+      rectangle, rounded corners=4pt,
+      draw=black!50, fill=gray!10,
+      text width=9cm, minimum height=1cm,
+      align=center, font=\songti\zihao{5}
+    }
+  ]
+    \node[io] (input) {输入：病理图像 patch（256$\times$256，H\&E染色）};
+
+    \node[block, below=0.6cm of input] (sam) {
+      \textbf{SAM ViT-H Encoder（特征提取）}\\
+      冻结前20层，微调后12层 + neck
+    };
+    \node[label, right=0.3cm of sam] {病理域预训练特征，边界感知强};
+
+    \node[block, below=0.6cm of sam] (mamba) {
+      \textbf{Mamba 特征融合模块（长程建模）}\\
+      VSS Block $\times$ 4 + FPN式多尺度融合
+    };
+    \node[label, right=0.3cm of mamba] {跨patch上下文，缓解边界问题};
+
+    \node[block, below=0.6cm of mamba] (hover) {
+      \textbf{HoverNet 三分支解码器（输出预测）}\\
+      NP Branch + HoVer Branch + NC Branch
+    };
+    \node[label, right=0.3cm of hover] {成熟机制，直接复用};
+
+    \node[io, below=0.6cm of hover] (post) {后处理：Marker-controlled Watershed};
+
+    \node[io, below=0.6cm of post] (output) {输出：实例掩码 + 核类型标签};
+
+    \draw[arrow] (input) -- (sam);
+    \draw[arrow] (sam) -- node[right, label]{4个不同深度的特征图} (mamba);
+    \draw[arrow] (mamba) -- node[right, label]{统一特征图} (hover);
+    \draw[arrow] (hover) -- (post);
+    \draw[arrow] (post) -- (output);
+  \end{tikzpicture}
+  \caption{SAM-Mamba-HoverNet 总体架构图}
+  \label{fig:arch}
+\end{figure}
+
+\section{各模块设计动机}
+
+\subsection{为什么用SAM Encoder}
+
+SAM（Segment Anything Model）由Meta AI于2023年提出，基于超过1100万张图像、10亿个分割掩码训练而成。其核心是一个ViT-H（Vision Transformer Huge）图像编码器，具备极强的特征提取能力，尤其对目标边界的感知能力远超ImageNet预训练的CNN。
+
+与ResNet50相比，SAM encoder在两个关键方面具有优势：第一，SAM的预训练任务是分割，即天然地对边界敏感，这与细胞核分割对边界精度的要求高度吻合；第二，SAM的ViT-H encoder通过自注意力机制建模全局特征，相比ResNet的局部感受野具有更强的表达能力。
+
+CellViT（2023）已经证明，使用SAM预训练权重初始化的ViT encoder，在PanNuke上的mPQ显著优于使用ImageNet预训练encoder的方法。本研究在此基础上，进一步引入Mamba模块来解决SAM encoder自身的局限性。
+
+\subsection{为什么用Mamba融合模块}
+
+SAM的ViT-H encoder采用窗口注意力机制（window attention），大多数层只在$14\times14$的局部窗口内计算注意力，这意味着单个token的感受野仍然受限，跨窗口（跨patch）的全局上下文信息无法有效传播。
+
+Mamba基于状态空间模型，能够以线性时间复杂度处理任意长度的序列，且每个位置的输出都依赖于完整的历史序列——换言之，Mamba在建模全局依赖时没有感受野限制。将SAM encoder输出的特征图展开为序列后，通过Mamba的4方向扫描（水平前向、水平后向、垂直前向、垂直后向），可以建模图像中任意两个位置之间的依赖关系，从而缓解patch边界处因缺乏上下文信息导致的分割误差。
+
+具体实现上，采用VMamba~\cite{Liu2024}中提出的视觉状态空间块（VSS Block）作为基本单元，在SAM encoder的多尺度特征图上分别进行Mamba序列建模，再通过FPN式的特征金字塔网络将多尺度特征融合，输出统一的特征表示。
+
+\subsection{为什么保留HoverNet的解码器}
+
+HoverNet的三分支解码器经过数十篇论文的验证，是目前细胞核实例分割领域最成熟的解码框架之一。其核心机制——hover-map（水平垂直距离图）——在粘连核分离上具有物理意义上的合理性，且解码器本身轻量（无需额外标注，GT可自动从实例掩码计算）。
+
+在本研究中，只替换特征提取的前端（encoder），保留decoder不变，这样做有两个优点：一是避免引入过多变量，能够清晰地消融SAM和Mamba各自的贡献；二是充分利用HoverNet在解码器设计上积累的经验，降低实现风险。
+
+\section{与现有方法的差异对比}
+
+\begin{table}[H]
+  \centering
+  \caption{与现有主要方法的对比}
+  \label{tab:compare}
+  \small
+  \begin{tabularx}{\textwidth}{lXlcc}
+    \toprule
+    \textbf{方法} & \textbf{Encoder} & \textbf{长程建模} & \textbf{分类} & \textbf{主要局限} \\
+    \midrule
+    HoverNet (2019)   & ResNet50 (ImageNet) & 无         & \checkmark & 域偏移，patch边界 \\
+    TransNuSeg (2023) & Swin-T (ImageNet)   & 窗口注意力  & \checkmark & 泛化性不足 \\
+    CellViT (2023)    & ViT-H (SAM)         & 窗口注意力  & \checkmark & patch级，无Mamba \\
+    PanopMamba (2026) & Mamba (ImageNet)    & \checkmark & $\times$   & 无SAM，仅全景分割 \\
+    CPMamba (2025)    & Mamba               & \checkmark & \checkmark & 无SAM encoder \\
+    UN-SAM (2024)     & ViT-H (SAM)         & 窗口注意力  & $\times$   & 无Mamba，无分类 \\
+    \midrule
+    \textbf{本研究}    & \textbf{ViT-H (SAM)} & \textbf{\checkmark\ Mamba} & \textbf{\checkmark} & — \\
+    \bottomrule
+  \end{tabularx}
+\end{table}
+
+本研究是\textbf{首个将SAM encoder与Mamba融合模块结合，并在HoverNet三分支解码框架下应用于细胞核实例分割与分类任务的工作}。
+
+
+%% ============================================================
+\chapter{实验设计}
+%% ============================================================
+
+\section{数据集}
+
+本研究使用以下五个公开数据集进行训练和评估：
+
+\textbf{PanNuke}（主实验数据集）~\cite{Gamper2020}：由Warwick大学发布，包含来自19种组织类型的7901张$256\times256$病理图像patch，标注了5类细胞核（肿瘤上皮、炎症、结缔组织、死亡、普通上皮）。PanNuke是目前细胞核分割与分类任务最常用的基准数据集之一，具有组织类型多样、类别标注完整的特点。
+
+\textbf{MoNuSeg}~\cite{Kumar2020}：多器官细胞核分割数据集，包含来自7种器官的44张训练图像和14张测试图像，仅包含实例分割标注（无类型标注）。用于评估模型在不同器官H\&E切片上的泛化能力。
+
+\textbf{CoNIC（Lizard数据集）}：结肠细胞核识别与计数数据集，包含约4981张patch，标注6类细胞核，来自6种结肠组织。
+
+\textbf{MoNuSAC}：多器官多类型细胞核分割挑战赛数据集，包含来自4种器官的标注，共4类细胞核。
+
+\textbf{CoNSeP}：结直肠腺癌数据集，包含41张$1000\times1000$的H\&E图像，标注4类细胞核，由HoverNet原作者发布。
+
+\section{评估指标}
+
+\textbf{AJI（Aggregated Jaccard Index）}：聚合Jaccard指数，综合衡量实例分割的检测和分割质量，是MoNuSeg上最常用的评估指标。
+
+\textbf{PQ（Panoptic Quality）}：全景质量，分解为检测质量（DQ）和分割质量（SQ）两部分，能够分别反映检测精度和掩码精度，是目前最全面的实例分割评估指标。
+
+\textbf{mPQ（mean Panoptic Quality）}：多类别平均全景质量，在PanNuke等含类型标注的数据集上使用，反映分类精度与分割精度的综合表现。
+
+\textbf{F1（Detection F1）}：检测层面的F1分数，反映模型发现细胞核的能力。
+
+\section{对比方法}
+
+本研究与以下方法进行公平对比（使用相同训练集、相同数据增强、相同评估协议）：
+
+\begin{itemize}
+  \item HoverNet（ResNet50，2019）——经典baseline
+  \item TransNuSeg（Swin-T，2023）
+  \item CellViT（ViT-H SAM，2023）
+  \item UN-SAM（ViT-H SAM，2024）
+  \item PanopMamba（Mamba，2026）
+  \item CPMamba（Mamba + Category Prompt，2025）
+\end{itemize}
+
+\section{消融实验}
+
+为了验证各个模块的贡献，设计以下消融实验，如表~\ref{tab:ablation}所示。
+
+\begin{table}[H]
+  \centering
+  \caption{消融实验设计}
+  \label{tab:ablation}
+  \small
+  \begin{tabularx}{\textwidth}{clcX}
+    \toprule
+    \textbf{消融组} & \textbf{Encoder} & \textbf{Mamba融合} & \textbf{预期结论} \\
+    \midrule
+    A（baseline） & ResNet50           & $\times$            & HoverNet原始性能 \\
+    B             & VMamba (ImageNet)  & $\times$            & 仅换Mamba encoder的效果 \\
+    C             & SAM ViT-H          & $\times$            & 仅SAM encoder的效果 \\
+    D（完整模型） & SAM ViT-H          & \checkmark          & SAM+Mamba联合效果 \\
+    E             & SAM ViT-H（全冻结）& \checkmark          & 微调策略的影响 \\
+    F             & SAM ViT-H（全微调）& \checkmark          & 微调策略的影响 \\
+    G             & SAM ViT-H          & \checkmark（仅深层）& Mamba融合位置的影响 \\
+    \bottomrule
+  \end{tabularx}
+\end{table}
+
+
+\bibliography{bib/ref.bib}
+
+\end{document}
