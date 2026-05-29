@@ -3,3 +3,18 @@ __pycache__/
 *.py[cod]
 *.pyo
 .DS_Store
+
+# 大文件 - 禁止提交
+*.whl
+*.gif
+*.pth
+*.pt
+*.bin
+*.ckpt
+
+# Jupyter checkpoints
+.ipynb_checkpoints/
+
+# 模型权重 & 数据集
+checkpoints/
+results/
