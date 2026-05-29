@@ -34,7 +34,7 @@ from torch.nn import DataParallel  # TODO: switch to DistributedDataParallel
 from torch.utils.data import DataLoader
 
 from config import Config
-from dataloader.train_loader import FileLoader
+from dataloader.train_loader import FileLoader, PanNukeLoader
 from misc.utils import rm_n_mkdir
 from run_utils.engine import RunEngine
 from run_utils.utils import (
@@ -97,29 +97,45 @@ class TrainManager(Config):
     def _get_datagen(self, batch_size, run_mode, target_gen, nr_procs=0, fold_idx=0):
         nr_procs = nr_procs if not self.debug else 0
 
-        # ! Hard assumption on file type
-        file_list = []
-        if run_mode == "train":
-            data_dir_list = self.train_dir_list
+        if self.dataset_name == "pannuke":
+            parquet_paths = (
+                self.train_parquet_list if run_mode == "train"
+                else self.valid_parquet_list
+            )
+            print("Dataset %s (PanNuke parquet): %d file(s)" % (run_mode, len(parquet_paths)))
+            # For PanNuke with explicit train/valid parquet splits we use val_split=0/1
+            # to load all rows as the requested split.
+            val_split = 0.0 if run_mode == "train" else 1.0
+            input_dataset = PanNukeLoader(
+                parquet_paths=parquet_paths,
+                mode=run_mode,
+                with_type=self.type_classification,
+                setup_augmentor=nr_procs == 0,
+                val_split=val_split,
+                **self.shape_info[run_mode],
+            )
         else:
-            data_dir_list = self.valid_dir_list
-        for dir_path in data_dir_list:
-            file_list.extend(glob.glob("%s/*.npy" % dir_path))
-        file_list.sort()  # to always ensure same input ordering
+            file_list = []
+            data_dir_list = (
+                self.train_dir_list if run_mode == "train" else self.valid_dir_list
+            )
+            for dir_path in data_dir_list:
+                file_list.extend(glob.glob("%s/*.npy" % dir_path))
+            file_list.sort()
 
-        assert len(file_list) > 0, (
-            "No .npy found for `%s`, please check `%s` in `config.py`"
-            % (run_mode, "%s_dir_list" % run_mode)
-        )
-        print("Dataset %s: %d" % (run_mode, len(file_list)))
-        input_dataset = FileLoader(
-            file_list,
-            mode=run_mode,
-            with_type=self.type_classification,
-            setup_augmentor=nr_procs == 0,
-            target_gen=target_gen,
-            **self.shape_info[run_mode]
-        )
+            assert len(file_list) > 0, (
+                "No .npy found for `%s`, please check `%s` in `config.py`"
+                % (run_mode, "%s_dir_list" % run_mode)
+            )
+            print("Dataset %s: %d" % (run_mode, len(file_list)))
+            input_dataset = FileLoader(
+                file_list,
+                mode=run_mode,
+                with_type=self.type_classification,
+                setup_augmentor=nr_procs == 0,
+                target_gen=target_gen,
+                **self.shape_info[run_mode],
+            )
 
         dataloader = DataLoader(
             input_dataset,

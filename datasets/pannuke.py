@@ -1,65 +1,45 @@
-"""PanNuke dataset loader for HoverNet-style training.
+"""PanNuke dataset loader.
 
-PanNuke format:
-    images/fold{n}/images.npy  : (N, 256, 256, 3)  float64, range [0, 255]
-    masks/fold{n}/masks.npy    : (N, 256, 256, 6)  float64
-        channel 0: Neoplastic
-        channel 1: Inflammatory
-        channel 2: Connective
-        channel 3: Dead
-        channel 4: Epithelial
-        channel 5: Background
-    images/fold{n}/types.npy   : (N,)  str, tissue type
-
-Each mask channel contains instance IDs (0 = background, 1,2,... = instances).
-We convert to HoverNet format:
-    np_map  : (H, W)     binary foreground mask
-    hv_map  : (H, W, 2)  horizontal/vertical distance maps
-    tp_map  : (H, W)     nuclear type map (1-indexed, 0=background)
+读取 HuggingFace parquet 格式，生成 HoverNet 训练所需的 target（np_map,
+hv_map, edge_map），支持 albumentations 数据增强和 DDP DistributedSampler。
 """
 
-import sys
+import io
 import os
+import sys
+from pathlib import Path
+
+import cv2
 import numpy as np
 import torch
 import torch.utils.data
-import imgaug as ia
-from imgaug import augmenters as iaa
+import albumentations as A
 from scipy.ndimage import measurements
 from skimage import morphology as morph
 
-# Allow importing from hover_net directory
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'hover_net'))
-from dataloader.augs import fix_mirror_padding
-from misc.utils import cropping_center, get_bounding_box
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
+
+from hover_net_new.misc.utils import cropping_center, get_bounding_box, fix_mirror_padding
 
 
-# PanNuke class index → type name (1-indexed to match HoverNet convention)
 PANNUKE_CLASSES = {
-    0: 'background',
-    1: 'neoplastic',
-    2: 'inflammatory',
-    3: 'connective',
-    4: 'dead',
-    5: 'epithelial',
+    0: "background",
+    1: "neoplastic",
+    2: "inflammatory",
+    3: "connective",
+    4: "dead",
+    5: "epithelial",
 }
-NR_TYPES = 6  # including background
 
 
-def gen_hv_map(inst_map):
-    """Generate horizontal and vertical distance maps from instance map.
+# ─────────────────────────────────────────────────────────────────────────────
+# Target generation
+# ─────────────────────────────────────────────────────────────────────────────
 
-    Replicates hover_net/models/hovernet/targets.py::gen_instance_hv_map
-    but operates directly on a pre-loaded instance map (no crop needed
-    since PanNuke patches are already 256x256).
-
-    Args:
-        inst_map: (H, W) int array, 0=background, 1..N=instance IDs
-
-    Returns:
-        hv_map: (H, W, 2) float32, horizontal and vertical distance maps
-    """
-    fixed_ann = fix_mirror_padding(inst_map.copy())
+def _gen_hv_map(inst_map: np.ndarray) -> np.ndarray:
+    """从实例 ID 图生成 (H, W, 2) HoVer 距离图。"""
+    fixed_ann      = fix_mirror_padding(inst_map.copy())
     inst_map_clean = morph.remove_small_objects(fixed_ann, min_size=30)
 
     x_map = np.zeros(inst_map.shape[:2], dtype=np.float32)
@@ -71,7 +51,7 @@ def gen_hv_map(inst_map):
 
     for inst_id in inst_list:
         inst_mask = np.array(fixed_ann == inst_id, dtype=np.uint8)
-        inst_box = get_bounding_box(inst_mask)
+        inst_box  = get_bounding_box(inst_mask)
 
         inst_box[0] -= 2
         inst_box[2] -= 2
@@ -82,7 +62,7 @@ def gen_hv_map(inst_map):
         if inst_crop.shape[0] < 2 or inst_crop.shape[1] < 2:
             continue
 
-        inst_com = list(measurements.center_of_mass(inst_crop))
+        inst_com    = list(measurements.center_of_mass(inst_crop))
         inst_com[0] = int(inst_com[0] + 0.5)
         inst_com[1] = int(inst_com[1] + 0.5)
 
@@ -110,224 +90,239 @@ def gen_hv_map(inst_map):
     return np.dstack([x_map, y_map])
 
 
-def pannuke_masks_to_hovernet(masks):
-    """Convert PanNuke 6-channel mask to HoverNet targets.
+def _gen_edge_map(np_map: np.ndarray) -> np.ndarray:
+    """从二值核掩码生成边缘图（拉普拉斯算子）。
+
+    边缘信息反映核的几何形态而非染色外观，有助于提升跨域泛化能力。
 
     Args:
-        masks: (H, W, 6) float64 array, each channel = instance IDs for that class
+        np_map: (H, W) int32 二值图，核像素=1，背景=0
+    Returns:
+        edge_map: (H, W) float32 二值图，边缘像素=1，其余=0
+    """
+    np_uint8  = (np_map * 255).astype(np.uint8)
+    laplacian = cv2.Laplacian(np_uint8, cv2.CV_64F)
+    return (np.abs(laplacian) > 0).astype(np.float32)
+
+
+def _masks_to_targets(masks: np.ndarray, mask_shape) -> dict:
+    """将 PanNuke (H, W, 6) 掩码转换为 HoverNet 训练 targets。
 
     Returns:
-        inst_map : (H, W) int32  — merged instance ID map (unique across classes)
-        tp_map   : (H, W) int32  — type map (0=bg, 1=neoplastic, ..., 5=epithelial)
-        np_map   : (H, W) int32  — binary foreground (0=bg, 1=nucleus)
-        hv_map   : (H, W, 2) float32 — hover maps
+        dict with keys: np_map, hv_map, tp_map, edge_map
+        （tp_map 保留用于兼容 hover_net_new baseline 训练；edge_map 为新增）
     """
-    H, W = masks.shape[:2]
-    inst_map = np.zeros((H, W), dtype=np.int32)
-    tp_map = np.zeros((H, W), dtype=np.int32)
+    H, W        = masks.shape[:2]
+    inst_map    = np.zeros((H, W), dtype=np.int32)
+    tp_map      = np.zeros((H, W), dtype=np.int32)
+    current_max = 0
 
-    current_max_id = 0
-    # channels 0-4 are the 5 nuclear types; channel 5 is background (skip)
     for cls_idx in range(5):
         cls_mask = masks[..., cls_idx].astype(np.int32)
-        inst_ids = np.unique(cls_mask)
-        inst_ids = inst_ids[inst_ids > 0]
-        for inst_id in inst_ids:
-            region = cls_mask == inst_id
-            new_id = current_max_id + 1
-            inst_map[region] = new_id
-            tp_map[region] = cls_idx + 1  # 1-indexed type
-            current_max_id += 1
+        for inst_id in np.unique(cls_mask):
+            if inst_id == 0:
+                continue
+            region           = cls_mask == inst_id
+            inst_map[region] = current_max + 1
+            tp_map[region]   = cls_idx + 1
+            current_max     += 1
 
-    np_map = (inst_map > 0).astype(np.int32)
-    hv_map = gen_hv_map(inst_map)
+    hv_map   = _gen_hv_map(inst_map)
+    np_map   = (inst_map > 0).astype(np.int32)
+    edge_map = _gen_edge_map(np_map)
 
-    return inst_map, tp_map, np_map, hv_map
+    return {
+        "np_map":   cropping_center(np_map,   mask_shape),
+        "hv_map":   cropping_center(hv_map,   mask_shape),
+        "tp_map":   cropping_center(tp_map,   mask_shape),   # 保留，兼容 baseline
+        "edge_map": cropping_center(edge_map, mask_shape),   # 新增
+    }
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Parquet loading
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _load_parquet(path: str):
+    """加载一个 fold 的 parquet 文件 → (N,256,256,3) uint8, (N,256,256,6)。"""
+    import pandas as pd
+    from PIL import Image
+
+    df     = pd.read_parquet(path)
+    N      = len(df)
+    images = np.zeros((N, 256, 256, 3), dtype=np.uint8)
+    masks  = np.zeros((N, 256, 256, 6), dtype=np.float64)
+
+    for i, row in df.iterrows():
+        img = row["image"]
+        if isinstance(img, dict) and "bytes" in img:
+            img = Image.open(io.BytesIO(img["bytes"])).convert("RGB")
+        images[i] = np.array(img, dtype=np.uint8)
+
+        inst_id = 1
+        for inst_img, cls_idx in zip(row["instances"], row["categories"]):
+            if isinstance(inst_img, dict) and "bytes" in inst_img:
+                inst_img = Image.open(io.BytesIO(inst_img["bytes"]))
+            inst_arr              = np.array(inst_img, dtype=bool)
+            masks[i, inst_arr, cls_idx] = inst_id
+            inst_id              += 1
+
+    return images, masks
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Augmentation
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _build_augmentation(mode: str, seed: int):
+    additional_targets = {f"mask{c}": "mask" for c in range(6)}
+
+    if mode == "train":
+        return A.Compose([
+            A.Affine(
+                scale=(0.8, 1.2),
+                translate_percent=(-0.01, 0.01),
+                shear=(-5, 5),
+                rotate=(-179, 179),
+                interpolation=cv2.INTER_NEAREST,
+                p=1.0,
+            ),
+            A.HorizontalFlip(p=0.5),
+            A.VerticalFlip(p=0.5),
+            A.OneOf([
+                A.GaussianBlur(blur_limit=(3, 3), p=1.0),
+                A.MedianBlur(blur_limit=3, p=1.0),
+                A.GaussNoise(p=1.0),
+            ], p=1.0),
+            A.OneOf([
+                A.HueSaturationValue(
+                    hue_shift_limit=8,
+                    sat_shift_limit=int(0.2 * 255),
+                    val_shift_limit=26,
+                    p=1.0,
+                ),
+                A.RandomBrightnessContrast(
+                    brightness_limit=26 / 255,
+                    contrast_limit=0.25,
+                    p=1.0,
+                ),
+            ], p=1.0),
+        ], additional_targets=additional_targets, seed=seed)
+    else:
+        return None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Dataset
+# ─────────────────────────────────────────────────────────────────────────────
 
 class PanNukeDataset(torch.utils.data.Dataset):
-    """PanNuke dataset for HoverNet-style training.
-
-    Args:
-        fold_dirs : list of fold directories, e.g.
-                    ['/path/to/pannuke/Fold1', '/path/to/pannuke/Fold2']
-        mode      : 'train' or 'valid'
-        input_shape : (H, W) input patch size fed to network
-        mask_shape  : (H, W) output mask size (center crop of input)
-        val_split   : fraction of data to use for validation (only used
-                      when mode='valid')
-        seed        : random seed for train/val split
-    """
+    """PanNuke dataset，输出 np_map / hv_map / tp_map / edge_map 四个 target。"""
 
     def __init__(
         self,
-        fold_dirs,
-        mode='train',
+        parquet_paths: list,
+        mode: str = "train",
         input_shape=(256, 256),
         mask_shape=(164, 164),
-        val_split=0.1,
-        seed=42,
+        seed: int = 42,
     ):
-        self.mode = mode
+        self.mode        = mode
         self.input_shape = input_shape
-        self.mask_shape = mask_shape
+        self.mask_shape  = mask_shape
 
         images_list, masks_list = [], []
-        for fold_dir in fold_dirs:
-            # find fold number from directory name
-            fold_name = os.path.basename(fold_dir.rstrip('/'))  # e.g. 'Fold1'
-            fold_num = ''.join(filter(str.isdigit, fold_name))  # '1'
-            fold_key = f'fold{fold_num}'
-
-            img_path  = os.path.join(fold_dir, 'images', fold_key, 'images.npy')
-            mask_path = os.path.join(fold_dir, 'masks',  fold_key, 'masks.npy')
-
-            imgs  = np.load(img_path)   # (N, 256, 256, 3)
-            masks = np.load(mask_path)  # (N, 256, 256, 6)
+        for p in parquet_paths:
+            imgs, msks = _load_parquet(p)
             images_list.append(imgs)
-            masks_list.append(masks)
+            masks_list.append(msks)
 
-        all_images = np.concatenate(images_list, axis=0)  # (N_total, 256, 256, 3)
-        all_masks  = np.concatenate(masks_list,  axis=0)  # (N_total, 256, 256, 6)
-
-        # train / val split
-        N = len(all_images)
-        rng = np.random.default_rng(seed)
-        indices = rng.permutation(N)
-        val_n = max(1, int(N * val_split))
-
-        if mode == 'train':
-            sel = indices[val_n:]
-        else:
-            sel = indices[:val_n]
-
-        self.images = all_images[sel]
-        self.masks  = all_masks[sel]
-
-        self.augmentor = self._build_augmentor(mode, seed)
-
-    def _build_augmentor(self, mode, seed):
-        if mode == 'train':
-            return iaa.Sequential([
-                iaa.Fliplr(0.5, seed=seed),
-                iaa.Flipud(0.5, seed=seed),
-                iaa.Affine(
-                    rotate=(-179, 179),
-                    order=0,
-                    backend='cv2',
-                    seed=seed,
-                ),
-                iaa.Sometimes(0.5, iaa.GaussianBlur(sigma=(0, 0.5))),
-                iaa.Sometimes(0.5, iaa.AdditiveGaussianNoise(scale=(0, 0.05 * 255))),
-                iaa.Sometimes(0.5, iaa.LinearContrast((0.75, 1.25))),
-            ])
-        else:
-            return None
+        self.images = np.concatenate(images_list, axis=0)
+        self.masks  = np.concatenate(masks_list,  axis=0)
+        self.aug    = _build_augmentation(mode, seed)
 
     def __len__(self):
         return len(self.images)
 
     def __getitem__(self, idx):
-        img   = self.images[idx].astype(np.float32)   # (256, 256, 3)
-        masks = self.masks[idx]                        # (256, 256, 6)
+        img   = self.images[idx].copy()
+        masks = self.masks[idx].copy()
 
-        # augmentation (shape-preserving, applied jointly to img and masks)
-        if self.augmentor is not None:
-            aug_det = self.augmentor.to_deterministic()
-            img_uint8 = img.astype(np.uint8)
-            img_uint8 = aug_det.augment_image(img_uint8)
-            img = img_uint8.astype(np.float32)
-            # augment each mask channel independently (same transform)
-            for c in range(masks.shape[-1]):
-                masks[..., c] = aug_det.augment_image(
-                    masks[..., c].astype(np.uint8)
-                ).astype(masks.dtype)
+        if self.aug is not None:
+            mask_dict = {f"mask{c}": masks[..., c].astype(np.uint8) for c in range(6)}
+            result    = self.aug(image=img, **mask_dict)
+            img       = result["image"]
+            for c in range(6):
+                masks[..., c] = result[f"mask{c}"].astype(masks.dtype)
 
-        # convert masks → HoverNet targets
-        _, tp_map, np_map, hv_map = pannuke_masks_to_hovernet(masks)
+        img     = cropping_center(img, self.input_shape)
+        targets = _masks_to_targets(masks, self.mask_shape)
 
-        # center-crop to mask_shape
-        tp_map = cropping_center(tp_map, self.mask_shape)
-        np_map = cropping_center(np_map, self.mask_shape)
-        hv_map = cropping_center(hv_map, self.mask_shape)
-        img_cropped = cropping_center(img, self.input_shape)
-
-        # to tensors
-        img_tensor = torch.from_numpy(img_cropped).permute(2, 0, 1).float()  # (3, H, W)
-        np_tensor  = torch.from_numpy(np_map).long()
-        hv_tensor  = torch.from_numpy(hv_map).permute(2, 0, 1).float()      # (2, H, W)
-        tp_tensor  = torch.from_numpy(tp_map).long()
+        img_tensor  = torch.from_numpy(img).permute(2, 0, 1).float()
+        np_tensor   = torch.from_numpy(targets["np_map"]).long()
+        hv_tensor   = torch.from_numpy(targets["hv_map"]).permute(2, 0, 1).float()
+        tp_tensor   = torch.from_numpy(targets["tp_map"]).long()
+        edge_tensor = torch.from_numpy(targets["edge_map"]).float()
 
         return {
-            'img':    img_tensor,
-            'np_map': np_tensor,
-            'hv_map': hv_tensor,
-            'tp_map': tp_tensor,
+            "img":      img_tensor,
+            "np_map":   np_tensor,
+            "hv_map":   hv_tensor,
+            "tp_map":   tp_tensor,       # 保留，兼容 hover_net_new baseline
+            "edge_map": edge_tensor,     # 新增
         }
 
 
-def get_pannuke_loaders(
-    fold_dirs_train,
-    fold_dirs_val=None,
-    input_shape=(256, 256),
-    mask_shape=(164, 164),
-    batch_size=8,
-    num_workers=4,
-    val_split=0.1,
-    seed=42,
-):
-    """Convenience function to build train and val DataLoaders.
+# ─────────────────────────────────────────────────────────────────────────────
+# DataLoader factory
+# ─────────────────────────────────────────────────────────────────────────────
 
-    Args:
-        fold_dirs_train : list of fold dirs used for training
-        fold_dirs_val   : list of fold dirs used for validation (if None,
-                          val_split fraction of fold_dirs_train is used)
-        input_shape     : (H, W) network input size
-        mask_shape      : (H, W) network output size
-        batch_size      : training batch size
-        num_workers     : DataLoader workers
-        val_split       : validation fraction (ignored if fold_dirs_val given)
-        seed            : reproducibility seed
+def get_loaders(cfg, rank: int = 0, world_size: int = 1):
+    """构建 train/val DataLoader，支持 DDP DistributedSampler。"""
+    train_ds = PanNukeDataset(
+        parquet_paths=cfg.train_parquet,
+        mode="train",
+        input_shape=tuple(cfg.input_shape),
+        mask_shape=tuple(cfg.mask_shape),
+        seed=cfg.seed,
+    )
+    val_ds = PanNukeDataset(
+        parquet_paths=cfg.val_parquet,
+        mode="valid",
+        input_shape=tuple(cfg.input_shape),
+        mask_shape=tuple(cfg.mask_shape),
+        seed=cfg.seed,
+    )
 
-    Returns:
-        train_loader, val_loader
-    """
-    if fold_dirs_val is not None:
-        train_ds = PanNukeDataset(
-            fold_dirs_train, mode='train',
-            input_shape=input_shape, mask_shape=mask_shape,
-            val_split=0.0, seed=seed,
+    train_sampler = (
+        torch.utils.data.distributed.DistributedSampler(
+            train_ds, num_replicas=world_size, rank=rank, shuffle=True
         )
-        val_ds = PanNukeDataset(
-            fold_dirs_val, mode='valid',
-            input_shape=input_shape, mask_shape=mask_shape,
-            val_split=1.0, seed=seed,
+        if world_size > 1 else None
+    )
+    val_sampler = (
+        torch.utils.data.distributed.DistributedSampler(
+            val_ds, num_replicas=world_size, rank=rank, shuffle=False
         )
-    else:
-        train_ds = PanNukeDataset(
-            fold_dirs_train, mode='train',
-            input_shape=input_shape, mask_shape=mask_shape,
-            val_split=val_split, seed=seed,
-        )
-        val_ds = PanNukeDataset(
-            fold_dirs_train, mode='valid',
-            input_shape=input_shape, mask_shape=mask_shape,
-            val_split=val_split, seed=seed,
-        )
+        if world_size > 1 else None
+    )
 
     train_loader = torch.utils.data.DataLoader(
         train_ds,
-        batch_size=batch_size,
-        shuffle=True,
-        num_workers=num_workers,
+        batch_size=cfg.batch_size,
+        sampler=train_sampler,
+        shuffle=(train_sampler is None),
+        num_workers=cfg.num_workers,
         pin_memory=True,
         drop_last=True,
     )
     val_loader = torch.utils.data.DataLoader(
         val_ds,
-        batch_size=batch_size,
+        batch_size=cfg.batch_size,
+        sampler=val_sampler,
         shuffle=False,
-        num_workers=num_workers,
+        num_workers=cfg.num_workers,
         pin_memory=True,
     )
-    return train_loader, val_loader
+
+    return train_loader, val_loader, train_sampler
