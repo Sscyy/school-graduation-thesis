@@ -27,6 +27,7 @@ from sam_hovernet.models.sam_amfr_hovernet import SAM2AMFRHoverNet
 from hover_net_new.misc.utils import cropping_center
 from hover_net_new.metrics.stats_utils import get_fast_pq, get_fast_aji, remap_label
 from hover_net_new.models.hovernet.post_proc import process
+from viz_html import save_viz_html
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -88,27 +89,35 @@ def model_out_to_pred_map(out: dict) -> np.ndarray:
 # Visualization
 # ─────────────────────────────────────────────────────────────────────────────
 
-def make_viz(img: np.ndarray, true_inst: np.ndarray, pred_inst: np.ndarray) -> np.ndarray:
-    """生成可视化拼图：原图 / GT 轮廓 / 预测轮廓。"""
+def make_viz(img: np.ndarray, true_inst: np.ndarray, pred_inst: np.ndarray):
+    """返回 (orig_rgb, gt_rgb, pred_rgb) 三张独立 RGB 图，用于 HTML 可视化。
+
+    - 绿色轮廓：真实标注（GT）
+    - 橙色轮廓：模型预测
+    """
     mask_h, mask_w = true_inst.shape[:2]
-    img_crop = cropping_center(img, (mask_h, mask_w))
+    img_crop = cropping_center(img, (mask_h, mask_w))   # RGB
     img_bgr  = cv2.cvtColor(img_crop, cv2.COLOR_RGB2BGR)
 
-    def draw_contours(base, inst_map, color=(0, 255, 0)):
-        out = base.copy()
+    def draw_contours(base_bgr, inst_map, color_bgr):
+        out = base_bgr.copy()
         for inst_id in np.unique(inst_map):
             if inst_id == 0:
                 continue
-            mask     = (inst_map == inst_id).astype(np.uint8)
+            mask = (inst_map == inst_id).astype(np.uint8)
             contours, _ = cv2.findContours(mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
-            cv2.drawContours(out, contours, -1, color, 1)
+            cv2.drawContours(out, contours, -1, color_bgr, 1)
         return out
 
-    return np.concatenate([
-        img_bgr,
-        draw_contours(img_bgr, true_inst, color=(0, 255, 0)),    # GT：绿
-        draw_contours(img_bgr, pred_inst, color=(0, 128, 255)),  # Pred：橙
-    ], axis=1)
+    gt_bgr   = draw_contours(img_bgr, true_inst, color_bgr=(0, 255, 0))    # 绿
+    pred_bgr = draw_contours(img_bgr, pred_inst, color_bgr=(0, 128, 255))  # 橙
+
+    # 返回 RGB 给 viz_html 使用
+    return (
+        img_crop,
+        cv2.cvtColor(gt_bgr,   cv2.COLOR_BGR2RGB),
+        cv2.cvtColor(pred_bgr, cv2.COLOR_BGR2RGB),
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -142,9 +151,6 @@ def main():
     device  = torch.device(args.device)
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    viz_dir = out_dir / "viz"
-    if args.viz_samples > 0:
-        viz_dir.mkdir(exist_ok=True)
 
     # 模型
     print(f"Loading model checkpoint: {args.checkpoint}")
@@ -168,9 +174,12 @@ def main():
     input_shape = (256, 256)
     mask_shape  = (164, 164)
 
+    # 固定种子，保证跨实验选取相同的图片（与训练随机状态完全隔离）
+    _viz_rng   = random.Random(42)
     viz_indices = set(
-        random.sample(range(len(samples)), min(args.viz_samples, len(samples)))
+        _viz_rng.sample(range(len(samples)), min(args.viz_samples, len(samples)))
     ) if args.viz_samples > 0 else set()
+    viz_data = []   # 收集 (orig_rgb, gt_rgb, pred_rgb) 元组
 
     all_pq   = []
     all_aji  = []
@@ -215,8 +224,8 @@ def main():
             all_aji.append(aji)
 
         if idx in viz_indices:
-            viz = make_viz(img_crop, true_inst_crop, pred_inst)
-            cv2.imwrite(str(viz_dir / f"{idx:05d}.png"), viz)
+            orig, gt, pred = make_viz(img_crop, true_inst_crop, pred_inst)
+            viz_data.append((orig, gt, pred))
 
     all_pq   = np.array(all_pq)
     all_aji  = np.array(all_aji)
@@ -244,8 +253,10 @@ def main():
     with open(json_path, "w") as f:
         json.dump(results, f, indent=2)
     print(f"\nMetrics saved to: {json_path}")
-    if args.viz_samples > 0:
-        print(f"Visualisations:  {viz_dir}")
+    if viz_data:
+        exp_name = Path(args.output_dir).parent.name  # 取实验目录名作为标题
+        html_path = out_dir / "viz.html"
+        save_viz_html(viz_data, str(html_path), title=exp_name)
 
 
 if __name__ == "__main__":

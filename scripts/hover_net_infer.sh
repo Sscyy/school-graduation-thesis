@@ -10,8 +10,8 @@ TRAIN_DIR="${PROJECT_ROOT}/hover_net_new"
 # ── 推理参数（在这里修改）────────────────────────────────────────────────────
 CHECKPOINT="/mnt/dolphinfs/hdd_pool/docker/user/hadoop-ba-dealrank/suchenyan/thesis/results/hovernet_baseline/best.pth"
 PARQUET="/mnt/dolphinfs/hdd_pool/docker/user/hadoop-ba-dealrank/suchenyan/thesis/PanNuke/fold3-00000-of-00001.parquet"
-OUTPUT_DIR="/mnt/dolphinfs/hdd_pool/docker/user/hadoop-ba-dealrank/suchenyan/thesis/results/hovernet_baseline/infer"
-VIZ_SAMPLES=100
+OUTPUT_DIR="/mnt/dolphinfs/hdd_pool/docker/user/hadoop-ba-dealrank/suchenyan/thesis/results/hovernet_baseline_html/infer"
+VIZ_SAMPLES=50
 MODE="fast"
 DEVICE="cuda"
 # ────────────────────────────────────────────────────────────────────────────

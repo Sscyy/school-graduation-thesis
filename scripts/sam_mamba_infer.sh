@@ -8,11 +8,11 @@ PROJECT_ROOT=$(dirname "$SCRIPT_DIR")
 INFER_DIR="${PROJECT_ROOT}/sam_hovernet"
 
 # ── 推理参数（在这里修改）────────────────────────────────────────────────────
-CHECKPOINT="/mnt/dolphinfs/hdd_pool/docker/user/hadoop-ba-dealrank/suchenyan/thesis/results/sam_B4_h20/best.pth"
+CHECKPOINT="/mnt/dolphinfs/hdd_pool/docker/user/hadoop-ba-dealrank/suchenyan/thesis/results/sam_amfr_uniform/best.pth"
 SAM2_CHECKPOINT="/mnt/dolphinfs/hdd_pool/docker/user/hadoop-ba-dealrank/suchenyan/thesis/SAM_ckp/sam2.1_hiera_base_plus.pt"
 PARQUET="/mnt/dolphinfs/hdd_pool/docker/user/hadoop-ba-dealrank/suchenyan/thesis/PanNuke/fold3-00000-of-00001.parquet"
-OUTPUT_DIR="/mnt/dolphinfs/hdd_pool/docker/user/hadoop-ba-dealrank/suchenyan/thesis/results/sam_B4_h20/infer"
-VIZ_SAMPLES=100
+OUTPUT_DIR="/mnt/dolphinfs/hdd_pool/docker/user/hadoop-ba-dealrank/suchenyan/thesis/results/sam_uniform_html/infer"
+VIZ_SAMPLES=50
 MODE="fast"
 FREEZE_STAGES=2
 #   A2：USE_BBE=False  USE_EA_SKIP=False  USE_EDGE_BRANCH=False  doing
@@ -21,7 +21,7 @@ FREEZE_STAGES=2
 #   B2：USE_BBE=True   USE_EA_SKIP=False  USE_EDGE_BRANCH=True
 #   B3：USE_BBE=True   USE_EA_SKIP=True   USE_EDGE_BRANCH=False
 #   B4：USE_BBE=True   USE_EA_SKIP=True   USE_EDGE_BRANCH=True   done
-USE_BBE=True          # 需与训练时一致
+USE_BBE=False          # 需与训练时一致
 USE_EA_SKIP=True      # 需与训练时一致
 USE_EDGE_BRANCH=True  # 需与训练时一致
 DEVICE="cuda"
