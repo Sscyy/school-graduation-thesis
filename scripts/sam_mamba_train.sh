@@ -10,7 +10,7 @@ TRAIN_DIR="${PROJECT_ROOT}/sam_hovernet"
 # ── 实验参数（在这里修改）────────────────────────────────────────────────────
 # 第三章消融（A系列，EA/Edge均关闭）：
 #   A2：USE_BBE=False  USE_EA_SKIP=False  USE_EDGE_BRANCH=False  doing
-#   A3：USE_BBE=True   USE_EA_SKIP=False  USE_EDGE_BRANCH=False
+#   A3：USE_BBE=True   USE_EA_SKIP=False  USE_EDGE_BRANCH=False. doing
 # 第四章消融（B系列，BBE保持True）：
 #   B2：USE_BBE=True   USE_EA_SKIP=False  USE_EDGE_BRANCH=True
 #   B3：USE_BBE=True   USE_EA_SKIP=True   USE_EDGE_BRANCH=False
@@ -25,17 +25,17 @@ SAM2_CHECKPOINT="/mnt/dolphinfs/hdd_pool/docker/user/hadoop-ba-dealrank/suchenya
 FREEZE_STAGES=2
 MODE="fast"
 USE_BBE=True
-USE_EA_SKIP=False
-USE_EDGE_BRANCH=False
+USE_EA_SKIP=True
+USE_EDGE_BRANCH=True
 
 # 输出
-OUTPUT_DIR="/mnt/dolphinfs/hdd_pool/docker/user/hadoop-ba-dealrank/suchenyan/thesis/results/sam_A2"
+OUTPUT_DIR="/mnt/dolphinfs/hdd_pool/docker/user/hadoop-ba-dealrank/suchenyan/thesis/results/sam_B4_h20"
 SAVE_EVERY=10
 LOG_INTERVAL=50
 
 # 训练
 EPOCHS=50
-BATCH_SIZE=8
+BATCH_SIZE=24
 NUM_WORKERS=8
 SEED=42
 LR_ENCODER=1e-5

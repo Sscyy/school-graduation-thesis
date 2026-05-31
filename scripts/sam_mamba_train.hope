@@ -4,13 +4,14 @@ type = ml-easy-job
 
 [resource]
 usergroup = hadoop-ba-dealrank
-queue = root.zw05_training_cluster.hadoop-recsys.serving
+queue = root.hldy_training_cluster.hadoop-recsys.pc
 
 [roles]
 workers = 1
 worker.memory = 720000
-worker.vcore = 120
-worker.gcores80g = 8
+worker.vcore = 50
+#worker.gcores80g = 8
+worker.gcoresh20-141g = 4
 worker.script = sh scripts/sam_mamba_train.sh
 
 [am]
